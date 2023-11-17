@@ -1,3 +1,4 @@
 Bug-Database: https://github.com/pytest-dev/pytest-xdist/issues
+Bug-Submit: https://github.com/pytest-dev/pytest-xdist/issues/new
 Repository: https://github.com/pytest-dev/pytest-xdist.git
 Repository-Browse: https://github.com/pytest-dev/pytest-xdist
