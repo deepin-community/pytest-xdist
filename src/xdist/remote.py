@@ -6,11 +6,12 @@
     needs not to be installed in remote environments.
 """
 
+import contextlib
 import sys
 import os
 import time
+from typing import Any
 
-import py
 import pytest
 from execnet.gateway_base import dumps, DumpError
 
@@ -24,6 +25,29 @@ except ImportError:
         pass
 
 
+class Producer:
+    """
+    Simplified implementation of the same interface as py.log, for backward compatibility
+    since we dropped the dependency on pylib.
+    Note: this is defined here because this module can't depend on xdist, so we need
+    to have the other way around.
+    """
+
+    def __init__(self, name: str, *, enabled: bool = True):
+        self.name = name
+        self.enabled = enabled
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.name!r}, enabled={self.enabled})"
+
+    def __call__(self, *a: Any, **k: Any) -> None:
+        if self.enabled:
+            print(f"[{self.name}]", *a, **k, file=sys.stderr)
+
+    def __getattr__(self, name: str) -> "Producer":
+        return type(self)(name, enabled=self.enabled)
+
+
 def worker_title(title):
     try:
         setproctitle(title)
@@ -33,26 +57,43 @@ def worker_title(title):
 
 
 class WorkerInteractor:
+    SHUTDOWN_MARK = object()
+    QUEUE_REPLACED_MARK = object()
+
     def __init__(self, config, channel):
         self.config = config
         self.workerid = config.workerinput.get("workerid", "?")
         self.testrunuid = config.workerinput["testrunuid"]
-        self.log = py.log.Producer("worker-%s" % self.workerid)
-        if not config.option.debug:
-            py.log.setconsumer(self.log._keywords, None)
+        self.log = Producer(f"worker-{self.workerid}", enabled=config.option.debug)
         self.channel = channel
+        self.torun = self._make_queue()
+        self.nextitem_index = None
         config.pluginmanager.register(self)
+
+    def _make_queue(self):
+        return self.channel.gateway.execmodel.queue.Queue()
+
+    def _get_next_item_index(self):
+        """Gets the next item from test queue. Handles the case when the queue
+        is replaced concurrently in another thread.
+        """
+        result = self.torun.get()
+        while result is self.QUEUE_REPLACED_MARK:
+            result = self.torun.get()
+        return result
 
     def sendevent(self, name, **kwargs):
         self.log("sending", name, kwargs)
         self.channel.send((name, kwargs))
 
+    @pytest.hookimpl
     def pytest_internalerror(self, excrepr):
         formatted_error = str(excrepr)
         for line in formatted_error.split("\n"):
             self.log("IERROR>", line)
         interactor.sendevent("internal_error", formatted_error=formatted_error)
 
+    @pytest.hookimpl
     def pytest_sessionstart(self, session):
         self.session = session
         workerinfo = getinfodict()
@@ -65,40 +106,67 @@ class WorkerInteractor:
         yield
         self.sendevent("workerfinished", workeroutput=self.config.workeroutput)
 
+    @pytest.hookimpl
     def pytest_collection(self, session):
         self.sendevent("collectionstart")
 
+    def handle_command(self, command):
+        if command is self.SHUTDOWN_MARK:
+            self.torun.put(self.SHUTDOWN_MARK)
+            return
+
+        name, kwargs = command
+
+        self.log("received command", name, kwargs)
+        if name == "runtests":
+            for i in kwargs["indices"]:
+                self.torun.put(i)
+        elif name == "runtests_all":
+            for i in range(len(self.session.items)):
+                self.torun.put(i)
+        elif name == "shutdown":
+            self.torun.put(self.SHUTDOWN_MARK)
+        elif name == "steal":
+            self.steal(kwargs["indices"])
+
+    def steal(self, indices):
+        indices = set(indices)
+        stolen = []
+
+        old_queue, self.torun = self.torun, self._make_queue()
+
+        def old_queue_get_nowait_noraise():
+            with contextlib.suppress(self.channel.gateway.execmodel.queue.Empty):
+                return old_queue.get_nowait()
+
+        for i in iter(old_queue_get_nowait_noraise, None):
+            if i in indices:
+                stolen.append(i)
+            else:
+                self.torun.put(i)
+
+        self.sendevent("unscheduled", indices=stolen)
+        old_queue.put(self.QUEUE_REPLACED_MARK)
+
+    @pytest.hookimpl
     def pytest_runtestloop(self, session):
         self.log("entering main loop")
-        torun = []
-        while 1:
-            try:
-                name, kwargs = self.channel.receive()
-            except EOFError:
-                return True
-            self.log("received command", name, kwargs)
-            if name == "runtests":
-                torun.extend(kwargs["indices"])
-            elif name == "runtests_all":
-                torun.extend(range(len(session.items)))
-            self.log("items to run:", torun)
-            # only run if we have an item and a next item
-            while len(torun) >= 2:
-                self.run_one_test(torun)
-            if name == "shutdown":
-                if torun:
-                    self.run_one_test(torun)
-                break
+        self.channel.setcallback(self.handle_command, endmarker=self.SHUTDOWN_MARK)
+        self.nextitem_index = self._get_next_item_index()
+        while self.nextitem_index is not self.SHUTDOWN_MARK:
+            self.run_one_test()
         return True
 
-    def run_one_test(self, torun):
+    def run_one_test(self):
+        self.item_index = self.nextitem_index
+        self.nextitem_index = self._get_next_item_index()
+
         items = self.session.items
-        self.item_index = torun.pop(0)
         item = items[self.item_index]
-        if torun:
-            nextitem = items[torun[0]]
-        else:
+        if self.nextitem_index is self.SHUTDOWN_MARK:
             nextitem = None
+        else:
+            nextitem = items[self.nextitem_index]
 
         worker_title("[pytest-xdist running] %s" % item.nodeid)
 
@@ -112,6 +180,21 @@ class WorkerInteractor:
             "runtest_protocol_complete", item_index=self.item_index, duration=duration
         )
 
+    def pytest_collection_modifyitems(self, session, config, items):
+        # add the group name to nodeid as suffix if --dist=loadgroup
+        if config.getvalue("loadgroup"):
+            for item in items:
+                mark = item.get_closest_marker("xdist_group")
+                if not mark:
+                    continue
+                gname = (
+                    mark.args[0]
+                    if len(mark.args) > 0
+                    else mark.kwargs.get("name", "default")
+                )
+                item._nodeid = f"{item.nodeid}@{gname}"
+
+    @pytest.hookimpl
     def pytest_collection_finish(self, session):
         try:
             topdir = str(self.config.rootpath)
@@ -124,12 +207,15 @@ class WorkerInteractor:
             ids=[item.nodeid for item in session.items],
         )
 
+    @pytest.hookimpl
     def pytest_runtest_logstart(self, nodeid, location):
         self.sendevent("logstart", nodeid=nodeid, location=location)
 
+    @pytest.hookimpl
     def pytest_runtest_logfinish(self, nodeid, location):
         self.sendevent("logfinish", nodeid=nodeid, location=location)
 
+    @pytest.hookimpl
     def pytest_runtest_logreport(self, report):
         data = self.config.hook.pytest_report_to_serializable(
             config=self.config, report=report
@@ -140,6 +226,7 @@ class WorkerInteractor:
         assert self.session.items[self.item_index].nodeid == report.nodeid
         self.sendevent("testreport", data=data)
 
+    @pytest.hookimpl
     def pytest_collectreport(self, report):
         # send only reports that have not passed to controller as optimization (#330)
         if not report.passed:
@@ -148,6 +235,7 @@ class WorkerInteractor:
             )
             self.sendevent("collectreport", data=data)
 
+    @pytest.hookimpl
     def pytest_warning_recorded(self, warning_message, when, nodeid, location):
         self.sendevent(
             "warning_recorded",
@@ -226,6 +314,7 @@ def remote_initconfig(option_dict, args):
 
 
 def setup_config(config, basetemp):
+    config.option.loadgroup = config.getvalue("dist") == "loadgroup"
     config.option.looponfail = False
     config.option.usepdb = False
     config.option.dist = "no"
@@ -236,8 +325,8 @@ def setup_config(config, basetemp):
 
 
 if __name__ == "__channelexec__":
-    channel = channel  # noqa
-    workerinput, args, option_dict, change_sys_path = channel.receive()
+    channel = channel  # type: ignore[name-defined] # noqa: F821
+    workerinput, args, option_dict, change_sys_path = channel.receive()  # type: ignore[name-defined]
 
     if change_sys_path is None:
         importpath = os.getcwd()
@@ -260,7 +349,7 @@ if __name__ == "__channelexec__":
 
     setup_config(config, option_dict.get("basetemp"))
     config._parser.prog = os.path.basename(workerinput["mainargv"][0])
-    config.workerinput = workerinput
-    config.workeroutput = {}
-    interactor = WorkerInteractor(config, channel)
+    config.workerinput = workerinput  # type: ignore[attr-defined]
+    config.workeroutput = {}  # type: ignore[attr-defined]
+    interactor = WorkerInteractor(config, channel)  # type: ignore[name-defined]
     config.hook.pytest_cmdline_main(config=config)

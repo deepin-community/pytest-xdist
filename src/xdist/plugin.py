@@ -1,14 +1,27 @@
 import os
 import uuid
 import sys
+import warnings
 
-import py
 import pytest
+
+
+PYTEST_GTE_7 = hasattr(pytest, "version_tuple") and pytest.version_tuple >= (7, 0)  # type: ignore[attr-defined]
 
 _sys_path = list(sys.path)  # freeze a copy of sys.path at interpreter startup
 
 
+@pytest.hookimpl
 def pytest_xdist_auto_num_workers(config):
+    env_var = os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS")
+    if env_var:
+        try:
+            return int(env_var)
+        except ValueError:
+            warnings.warn(
+                "PYTEST_XDIST_AUTO_NUM_WORKERS is not a number: {env_var!r}. Ignoring it."
+            )
+
     try:
         import psutil
     except ImportError:
@@ -46,6 +59,7 @@ def parse_numprocesses(s):
         return int(s)
 
 
+@pytest.hookimpl
 def pytest_addoption(parser):
     group = parser.getgroup("xdist", "distributed and subprocess testing")
     group._addoption(
@@ -80,7 +94,15 @@ def pytest_addoption(parser):
         "--dist",
         metavar="distmode",
         action="store",
-        choices=["each", "load", "loadscope", "loadfile", "no"],
+        choices=[
+            "each",
+            "load",
+            "loadscope",
+            "loadfile",
+            "loadgroup",
+            "worksteal",
+            "no",
+        ],
         dest="dist",
         default="no",
         help=(
@@ -92,6 +114,9 @@ def pytest_addoption(parser):
             " the same scope to any available environment.\n\n"
             "loadfile: load balance by sending test grouped by file"
             " to any available environment.\n\n"
+            "loadgroup: like load, but sends tests marked with 'xdist_group' to the same worker.\n\n"
+            "worksteal: split the test suite between available environments,"
+            " then rebalance when any worker runs out of tests.\n\n"
             "(default) no: run tests inprocess, don't distribute."
         ),
     )
@@ -129,11 +154,6 @@ def pytest_addoption(parser):
         help="add expression for ignores when rsyncing to remote tx nodes.",
     )
     group.addoption(
-        "--boxed",
-        action="store_true",
-        help="backward compatibility alias for pytest-forked --forked",
-    )
-    group.addoption(
         "--testrunuid",
         action="store",
         help=(
@@ -143,22 +163,36 @@ def pytest_addoption(parser):
             "on every test run."
         ),
     )
+    group.addoption(
+        "--maxschedchunk",
+        action="store",
+        type=int,
+        help=(
+            "Maximum number of tests scheduled in one step for --dist=load. "
+            "Setting it to 1 will force pytest to send tests to workers one by "
+            "one - might be useful for a small number of slow tests. "
+            "Larger numbers will allow the scheduler to submit consecutive "
+            "chunks of tests to workers - allows reusing fixtures. "
+            "Due to implementation reasons, at least 2 tests are scheduled per "
+            "worker at the start. Only later tests can be scheduled one by one. "
+            "Unlimited if not set."
+        ),
+    )
 
     parser.addini(
         "rsyncdirs",
         "list of (relative) paths to be rsynced for remote distributed testing.",
-        type="pathlist",
+        type="paths" if PYTEST_GTE_7 else "pathlist",
     )
     parser.addini(
         "rsyncignore",
         "list of (relative) glob-style paths to be ignored for rsyncing.",
-        type="pathlist",
+        type="paths" if PYTEST_GTE_7 else "pathlist",
     )
     parser.addini(
         "looponfailroots",
-        type="pathlist",
-        help="directories to check for changes",
-        default=[py.path.local()],
+        type="paths" if PYTEST_GTE_7 else "pathlist",
+        help="directories to check for changes. Default: current directory.",
     )
 
 
@@ -167,6 +201,7 @@ def pytest_addoption(parser):
 # -------------------------------------------------------------------------
 
 
+@pytest.hookimpl
 def pytest_addhooks(pluginmanager):
     from xdist import newhooks
 
@@ -178,9 +213,21 @@ def pytest_addhooks(pluginmanager):
 # -------------------------------------------------------------------------
 
 
-@pytest.mark.trylast
+@pytest.hookimpl(trylast=True)
 def pytest_configure(config):
-    if config.getoption("dist") != "no" and not config.getvalue("collectonly"):
+    config_line = (
+        "xdist_group: specify group for tests should run in same session."
+        "in relation to one another. Provided by pytest-xdist."
+    )
+    config.addinivalue_line("markers", config_line)
+
+    # Skip this plugin entirely when only doing collection.
+    if config.getvalue("collectonly"):
+        return
+
+    # Create the distributed session in case we have a valid distribution
+    # mode and test environments.
+    if config.getoption("dist") != "no" and config.getoption("tx"):
         from xdist.dsession import DSession
 
         session = DSession(config)
@@ -188,11 +235,24 @@ def pytest_configure(config):
         tr = config.pluginmanager.getplugin("terminalreporter")
         if tr:
             tr.showfspath = False
-    if config.getoption("boxed"):
-        config.option.forked = True
+
+    # Deprecation warnings for deprecated command-line/configuration options.
+    if config.getoption("looponfail", None) or config.getini("looponfailroots"):
+        warning = DeprecationWarning(
+            "The --looponfail command line argument and looponfailroots config variable are deprecated.\n"
+            "The loop-on-fail feature will be removed in pytest-xdist 4.0."
+        )
+        config.issue_config_time_warning(warning, 2)
+
+    if config.getoption("rsyncdir", None) or config.getini("rsyncdirs"):
+        warning = DeprecationWarning(
+            "The --rsyncdir command line argument and rsyncdirs config variable are deprecated.\n"
+            "The rsync feature will be removed in pytest-xdist 4.0."
+        )
+        config.issue_config_time_warning(warning, 2)
 
 
-@pytest.mark.tryfirst
+@pytest.hookimpl(tryfirst=True)
 def pytest_cmdline_main(config):
     usepdb = config.getoption("usepdb", False)  # a core option
     if config.option.numprocesses in ("auto", "logical"):
@@ -250,7 +310,7 @@ def is_xdist_controller(request_or_session) -> bool:
 is_xdist_master = is_xdist_controller
 
 
-def get_xdist_worker_id(request_or_session) -> str:
+def get_xdist_worker_id(request_or_session):
     """Return the id of the current worker ('gw0', 'gw1', etc) or 'master'
     if running on the controller node.
 

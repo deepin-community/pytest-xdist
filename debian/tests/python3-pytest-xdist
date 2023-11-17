@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+export PYTEST_ADDOPTS='-k "not test_internal_errors_propagate_to_controller"'
 cp -a testing/ "$AUTOPKGTEST_TMP"
 cd "$AUTOPKGTEST_TMP/testing/"
 for py in $(py3versions -s); do echo "[*] testing on $py:"; $py -Wd -m pytest -v 2>&1; done

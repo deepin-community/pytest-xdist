@@ -1,3 +1,187 @@
+pytest-xdist 3.3.1 (2023-05-19)
+===============================
+
+Bug Fixes
+---------
+
+- `#907 <https://github.com/pytest-dev/pytest-xdist/issues/907>`_: Avoid remote calls during startup as ``execnet`` by default does not ensure remote affinity with the
+  main thread and might accidentally schedule the pytest worker into a non-main thread, which breaks numerous frameworks,
+  for example ``asyncio``, ``anyio``, ``PyQt/PySide``, etc.
+
+  A more safe correction will require thread affinity in ``execnet`` (`pytest-dev/execnet#96 <https://github.com/pytest-dev/execnet/issues/96>`__).
+
+
+pytest-xdist 3.3.0 (2023-05-12)
+===============================
+
+Features
+--------
+
+- `#555 <https://github.com/pytest-dev/pytest-xdist/issues/555>`_: Improved progress output when collecting nodes to be less verbose.
+
+
+pytest-xdist 3.2.1 (2023-03-12)
+===============================
+
+Bug Fixes
+---------
+
+- `#884 <https://github.com/pytest-dev/pytest-xdist/issues/884>`_: Fixed hang in ``worksteal`` scheduler.
+
+
+pytest-xdist 3.2.0 (2023-02-07)
+===============================
+
+Improved Documentation
+----------------------
+
+- `#863 <https://github.com/pytest-dev/pytest-xdist/issues/863>`_: Document limitations for debugging due to standard I/O of workers not being forwarded. Also, mention remote debugging as a possible workaround.
+
+
+Features
+--------
+
+- `#855 <https://github.com/pytest-dev/pytest-xdist/issues/855>`_: Users can now configure ``load`` scheduling precision using ``--maxschedchunk`` command
+  line option.
+
+- `#858 <https://github.com/pytest-dev/pytest-xdist/issues/858>`_: New ``worksteal`` scheduler, based on the idea of `work stealing <https://en.wikipedia.org/wiki/Work_stealing>`_. It's similar to ``load`` scheduler, but it should handle tests with significantly differing duration better, and, at the same time, it should provide similar or better reuse of fixtures.
+
+
+Trivial Changes
+---------------
+
+- `#870 <https://github.com/pytest-dev/pytest-xdist/issues/870>`_: Make the tests pass even when ``$PYTEST_XDIST_AUTO_NUM_WORKERS`` is set.
+
+
+pytest-xdist 3.1.0 (2022-12-01)
+===============================
+
+Features
+--------
+
+- `#789 <https://github.com/pytest-dev/pytest-xdist/issues/789>`_: Users can now set a default distribution mode in their configuration file:
+
+  .. code-block:: ini
+
+      [pytest]
+      addopts = --dist loadscope
+
+- `#842 <https://github.com/pytest-dev/pytest-xdist/issues/842>`_: Python 3.11 is now officially supported.
+
+
+Removals
+--------
+
+- `#842 <https://github.com/pytest-dev/pytest-xdist/issues/842>`_: Python 3.6 is no longer supported.
+
+
+pytest-xdist 3.0.2 (2022-10-25)
+===============================
+
+Bug Fixes
+---------
+
+- `#813 <https://github.com/pytest-dev/pytest-xdist/issues/813>`_: Cancel shutdown when a crashed worker is restarted.
+
+
+Deprecations
+------------
+
+- `#825 <https://github.com/pytest-dev/pytest-xdist/issues/825>`_: The ``--rsyncdir`` command line argument and ``rsyncdirs`` config variable are deprecated.
+
+  The rsync feature will be removed in pytest-xdist 4.0.
+
+- `#826 <https://github.com/pytest-dev/pytest-xdist/issues/826>`_: The ``--looponfail`` command line argument and ``looponfailroots`` config variable are deprecated.
+
+  The loop-on-fail feature will be removed in pytest-xdist 4.0.
+
+
+Improved Documentation
+----------------------
+
+- `#791 <https://github.com/pytest-dev/pytest-xdist/issues/791>`_: Document the ``pytest_xdist_auto_num_workers`` hook.
+
+- `#796 <https://github.com/pytest-dev/pytest-xdist/issues/796>`_: Added known limitations section to documentation.
+
+- `#829 <https://github.com/pytest-dev/pytest-xdist/issues/829>`_: Document the ``-n logical`` option.
+
+
+Features
+--------
+
+- `#792 <https://github.com/pytest-dev/pytest-xdist/issues/792>`_: The environment variable ``PYTEST_XDIST_AUTO_NUM_WORKERS`` can now be used to
+  specify the default for ``-n auto`` and ``-n logical``.
+
+- `#812 <https://github.com/pytest-dev/pytest-xdist/issues/812>`_: Partially restore old initial batch distribution algorithm in ``LoadScheduling``.
+
+  pytest orders tests for optimal sequential execution - i. e. avoiding
+  unnecessary setup and teardown of fixtures. So executing tests in consecutive
+  chunks is important for optimal performance.
+
+  In v1.14, initial test distribution in ``LoadScheduling`` was changed to
+  round-robin, optimized for the corner case, when the number of tests is less
+  than ``2 * number of nodes``. At the same time, it became worse for all other
+  cases.
+
+  For example: if some tests use some "heavy" fixture, and these tests fit into
+  the initial batch, with round-robin distribution the fixture will be created
+  ``min(n_tests, n_workers)`` times, no matter how many other tests there are.
+
+  With the old algorithm (before v1.14), if there are enough tests not using
+  the fixture, the fixture was created only once.
+
+  So restore the old behavior for typical cases where the number of tests is
+  much greater than the number of workers (or, strictly speaking, when there
+  are at least 2 tests for every node).
+
+
+Removals
+--------
+
+- `#468 <https://github.com/pytest-dev/pytest-xdist/issues/468>`_: The ``--boxed`` command-line option has been removed. If you still need this functionality, install `pytest-forked <https://pypi.org/project/pytest-forked>`__ separately.
+
+
+Trivial Changes
+---------------
+
+- `#468 <https://github.com/pytest-dev/pytest-xdist/issues/468>`_: The ``py`` dependency has been dropped.
+
+- `#822 <https://github.com/pytest-dev/pytest-xdist/issues/822>`_: Replace internal usage of ``py.log`` with a custom solution (but with the same interface).
+
+- `#823 <https://github.com/pytest-dev/pytest-xdist/issues/823>`_: Remove usage of ``py._pydir`` as an rsync candidate.
+
+- `#824 <https://github.com/pytest-dev/pytest-xdist/issues/824>`_: Replace internal usages of ``py.path.local`` by ``pathlib.Path``.
+
+
+pytest-xdist 2.5.0 (2021-12-10)
+===============================
+
+Deprecations and Removals
+-------------------------
+
+- `#468 <https://github.com/pytest-dev/pytest-xdist/issues/468>`_: The ``--boxed`` command line argument is deprecated. Install `pytest-forked <https://pypi.org/project/pytest-forked>`__ and use ``--forked`` instead. pytest-xdist 3.0.0 will remove the ``--boxed`` argument and ``pytest-forked`` dependency.
+
+
+Features
+--------
+
+- `#722 <https://github.com/pytest-dev/pytest-xdist/issues/722>`_: Full compatibility with pytest 7 - no deprecation warnings or use of legacy features.
+
+- `#733 <https://github.com/pytest-dev/pytest-xdist/issues/733>`_: New ``--dist=loadgroup`` option, which ensures all tests marked with ``@pytest.mark.xdist_group`` run in the same session/worker. Other tests run distributed as in ``--dist=load``.
+
+
+Trivial Changes
+---------------
+
+- `#708 <https://github.com/pytest-dev/pytest-xdist/issues/708>`_: Use ``@pytest.hookspec`` decorator to declare hook options in ``newhooks.py`` to avoid warnings in ``pytest 7.0``.
+
+- `#719 <https://github.com/pytest-dev/pytest-xdist/issues/719>`_: Use up-to-date ``setup.cfg``/``pyproject.toml`` packaging setup.
+
+- `#720 <https://github.com/pytest-dev/pytest-xdist/issues/720>`_: Require pytest>=6.2.0.
+
+- `#721 <https://github.com/pytest-dev/pytest-xdist/issues/721>`_: Started using type annotations and mypy checking internally. The types are incomplete and not published.
+
+
 pytest-xdist 2.4.0 (2021-09-20)
 ===============================
 

@@ -1,7 +1,7 @@
 from collections import OrderedDict
 
 from _pytest.runner import CollectReport
-from py.log import Producer
+from xdist.remote import Producer
 from xdist.report import report_collection_diff
 from xdist.workermanage import parse_spec_config
 
@@ -213,13 +213,11 @@ class LoadScopeScheduling:
 
         # A new node has been added later, perhaps an original one died.
         if self.collection_is_completed:
-
             # Assert that .schedule() should have been called by now
             assert self.collection
 
             # Check that the new collection matches the official collection
             if collection != self.collection:
-
                 other_node = next(iter(self.registered_collections.keys()))
 
                 msg = report_collection_diff(
@@ -361,12 +359,12 @@ class LoadScopeScheduling:
         extra_nodes = len(self.nodes) - len(self.workqueue)
 
         if extra_nodes > 0:
-            self.log("Shuting down {} nodes".format(extra_nodes))
+            self.log(f"Shutting down {extra_nodes} nodes")
 
             for _ in range(extra_nodes):
                 unused_node, assigned = self.assigned_work.popitem(last=True)
 
-                self.log("Shuting down unused node {}".format(unused_node))
+                self.log(f"Shutting down unused node {unused_node}")
                 unused_node.shutdown()
 
         # Assign initial workload

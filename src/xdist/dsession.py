@@ -1,12 +1,19 @@
-import py
+from __future__ import annotations
+import sys
+from enum import Enum, auto
+from typing import Sequence
+
 import pytest
 
+from xdist.remote import Producer
 from xdist.workermanage import NodeManager
 from xdist.scheduler import (
     EachScheduling,
     LoadScheduling,
     LoadScopeScheduling,
     LoadFileScheduling,
+    LoadGroupScheduling,
+    WorkStealingScheduling,
 )
 
 
@@ -33,9 +40,7 @@ class DSession:
 
     def __init__(self, config):
         self.config = config
-        self.log = py.log.Producer("dsession")
-        if not config.option.debug:
-            py.log.setconsumer(self.log._keywords, None)
+        self.log = Producer("dsession", enabled=config.option.debug)
         self.nodemanager = None
         self.sched = None
         self.shuttingdown = False
@@ -67,7 +72,7 @@ class DSession:
         if self.terminal and self.config.option.verbose >= 0:
             self.terminal.write_line(line)
 
-    @pytest.mark.trylast
+    @pytest.hookimpl(trylast=True)
     def pytest_sessionstart(self, session):
         """Creates and starts the nodes.
 
@@ -79,6 +84,7 @@ class DSession:
         self._active_nodes.update(nodes)
         self._session = session
 
+    @pytest.hookimpl
     def pytest_sessionfinish(self, session):
         """Shutdown all nodes."""
         nm = getattr(self, "nodemanager", None)  # if not fully initialized
@@ -86,11 +92,12 @@ class DSession:
             nm.teardown_nodes()
         self._session = None
 
+    @pytest.hookimpl
     def pytest_collection(self):
         # prohibit collection of test items in controller process
         return True
 
-    @pytest.mark.trylast
+    @pytest.hookimpl(trylast=True)
     def pytest_xdist_make_scheduler(self, config, log):
         dist = config.getvalue("dist")
         schedulers = {
@@ -98,9 +105,12 @@ class DSession:
             "load": LoadScheduling,
             "loadscope": LoadScopeScheduling,
             "loadfile": LoadFileScheduling,
+            "loadgroup": LoadGroupScheduling,
+            "worksteal": WorkStealingScheduling,
         }
         return schedulers[dist](config, log)
 
+    @pytest.hookimpl
     def pytest_runtestloop(self):
         self.sched = self.config.hook.pytest_xdist_make_scheduler(
             config=self.config, log=self.log
@@ -166,7 +176,7 @@ class DSession:
         """
         self.config.hook.pytest_testnodedown(node=node, error=None)
         if node.workeroutput["exitstatus"] == 2:  # keyboard-interrupt
-            self.shouldstop = "{} received keyboard-interrupt".format(node)
+            self.shouldstop = f"{node} received keyboard-interrupt"
             self.worker_errordown(node, "keyboard-interrupt")
             return
         if node in self.sched.nodes:
@@ -220,12 +230,14 @@ class DSession:
             self.triggershutdown()
         else:
             self.report_line("\nreplacing crashed worker %s" % node.gateway.id)
+            self.shuttingdown = False
             self._clone_node(node)
         self._active_nodes.remove(node)
 
+    @pytest.hookimpl
     def pytest_terminal_summary(self, terminalreporter):
         if self.config.option.verbose >= 0 and self._summary_report:
-            terminalreporter.write_sep("=", "xdist: {}".format(self._summary_report))
+            terminalreporter.write_sep("=", f"xdist: {self._summary_report}")
 
     def worker_collectionfinish(self, node, ids):
         """worker has finished test collection.
@@ -244,14 +256,16 @@ class DSession:
         self._session.testscollected = len(ids)
         self.sched.add_node_collection(node, ids)
         if self.terminal:
-            self.trdist.setstatus(node.gateway.spec, "[%d]" % (len(ids)))
+            self.trdist.setstatus(
+                node.gateway.spec, WorkerStatus.CollectionDone, tests_collected=len(ids)
+            )
         if self.sched.collection_is_completed:
             if self.terminal and not self.sched.has_pending:
                 self.trdist.ensure_show_status()
                 self.terminal.write_line("")
                 if self.config.option.verbose > 0:
                     self.terminal.write_line(
-                        "scheduling tests via %s" % (self.sched.__class__.__name__)
+                        f"scheduling tests via {self.sched.__class__.__name__}"
                     )
             self.sched.schedule()
 
@@ -277,6 +291,17 @@ class DSession:
         """
         self.sched.mark_test_complete(node, item_index, duration)
 
+    def worker_unscheduled(self, node, indices):
+        """
+        Emitted when a node fires the 'unscheduled' event, signalling that
+        some tests have been removed from the worker's queue and should be
+        sent to some worker again.
+
+        This should happen only in response to 'steal' command, so schedulers
+        not using 'steal' command don't have to implement it.
+        """
+        self.sched.remove_pending_tests_from_node(node, indices)
+
     def worker_collectreport(self, node, rep):
         """Emitted when a node calls the pytest_collectreport hook.
 
@@ -288,6 +313,8 @@ class DSession:
 
     def worker_warning_captured(self, warning_message, when, item):
         """Emitted when a node calls the pytest_warning_captured hook (deprecated in 6.0)."""
+        # This hook as been removed in pytest 7.1, and we can remove support once we only
+        # support pytest >=7.1.
         kwargs = dict(warning_message=warning_message, when=when, item=item)
         self.config.hook.pytest_warning_captured.call_historic(kwargs=kwargs)
 
@@ -325,7 +352,7 @@ class DSession:
         if rep.failed:
             self.countfailures += 1
             if self.maxfail and self.countfailures >= self.maxfail:
-                self.shouldstop = "stopping after %d failures" % (self.countfailures)
+                self.shouldstop = f"stopping after {self.countfailures} failures"
 
     def triggershutdown(self):
         self.log("triggering shutdown")
@@ -338,7 +365,7 @@ class DSession:
         # XXX count no of failures and retry N times
         runner = self.config.pluginmanager.getplugin("runner")
         fspath = nodeid.split("::")[0]
-        msg = "worker {!r} crashed while running {!r}".format(worker.gateway.id, nodeid)
+        msg = f"worker {worker.gateway.id!r} crashed while running {nodeid!r}"
         rep = runner.TestReport(
             nodeid, (fspath, None, fspath), (), "failed", msg, "???"
         )
@@ -352,34 +379,51 @@ class DSession:
         self.config.hook.pytest_runtest_logreport(report=rep)
 
 
+class WorkerStatus(Enum):
+    """Status of each worker during creation/collection."""
+
+    # Worker spec has just been created.
+    Created = auto()
+
+    # Worker has been initialized.
+    Initialized = auto()
+
+    # Worker is now ready for collection.
+    ReadyForCollection = auto()
+
+    # Worker has finished collection.
+    CollectionDone = auto()
+
+
 class TerminalDistReporter:
-    def __init__(self, config):
+    def __init__(self, config) -> None:
         self.config = config
         self.tr = config.pluginmanager.getplugin("terminalreporter")
-        self._status = {}
+        self._status: dict[str, tuple[WorkerStatus, int]] = {}
         self._lastlen = 0
         self._isatty = getattr(self.tr, "isatty", self.tr.hasmarkup)
 
-    def write_line(self, msg):
+    def write_line(self, msg: str) -> None:
         self.tr.write_line(msg)
 
-    def ensure_show_status(self):
+    def ensure_show_status(self) -> None:
         if not self._isatty:
             self.write_line(self.getstatus())
 
-    def setstatus(self, spec, status, show=True):
-        self._status[spec.id] = status
+    def setstatus(
+        self, spec, status: WorkerStatus, *, tests_collected: int, show: bool = True
+    ) -> None:
+        self._status[spec.id] = (status, tests_collected)
         if show and self._isatty:
             self.rewrite(self.getstatus())
 
-    def getstatus(self):
+    def getstatus(self) -> str:
         if self.config.option.verbose >= 0:
-            parts = [
-                "{} {}".format(spec.id, self._status[spec.id]) for spec in self._specs
-            ]
-            return " / ".join(parts)
-        else:
-            return "bringing up nodes..."
+            line = get_workers_status_line(list(self._status.values()))
+            if line:
+                return line
+
+        return "bringing up nodes..."
 
     def rewrite(self, line, newline=False):
         pline = line + " " * max(self._lastlen - len(line), 0)
@@ -390,37 +434,44 @@ class TerminalDistReporter:
             self._lastlen = len(line)
         self.tr.rewrite(pline, bold=True)
 
-    def pytest_xdist_setupnodes(self, specs):
+    @pytest.hookimpl
+    def pytest_xdist_setupnodes(self, specs) -> None:
         self._specs = specs
         for spec in specs:
-            self.setstatus(spec, "I", show=False)
-        self.setstatus(spec, "I", show=True)
+            self.setstatus(spec, WorkerStatus.Created, tests_collected=0, show=False)
+        self.setstatus(spec, WorkerStatus.Created, tests_collected=0, show=True)
         self.ensure_show_status()
 
-    def pytest_xdist_newgateway(self, gateway):
+    @pytest.hookimpl
+    def pytest_xdist_newgateway(self, gateway) -> None:
         if self.config.option.verbose > 0:
             rinfo = gateway._rinfo()
-            version = "%s.%s.%s" % rinfo.version_info[:3]
-            self.rewrite(
-                "[%s] %s Python %s cwd: %s"
-                % (gateway.id, rinfo.platform, version, rinfo.cwd),
-                newline=True,
-            )
-        self.setstatus(gateway.spec, "C")
+            different_interpreter = rinfo.executable != sys.executable
+            if different_interpreter:
+                version = "%s.%s.%s" % rinfo.version_info[:3]
+                self.rewrite(
+                    f"[{gateway.id}] {rinfo.platform} Python {version} cwd: {rinfo.cwd}",
+                    newline=True,
+                )
+        self.setstatus(gateway.spec, WorkerStatus.Initialized, tests_collected=0)
 
-    def pytest_testnodeready(self, node):
+    @pytest.hookimpl
+    def pytest_testnodeready(self, node) -> None:
         if self.config.option.verbose > 0:
             d = node.workerinfo
-            infoline = "[{}] Python {}".format(
-                d["id"], d["version"].replace("\n", " -- ")
-            )
-            self.rewrite(infoline, newline=True)
-        self.setstatus(node.gateway.spec, "ok")
+            different_interpreter = d.get("executable") != sys.executable
+            if different_interpreter:
+                version = d["version"].replace("\n", " -- ")
+                self.rewrite(f"[{d['id']}] Python {version}", newline=True)
+        self.setstatus(
+            node.gateway.spec, WorkerStatus.ReadyForCollection, tests_collected=0
+        )
 
-    def pytest_testnodedown(self, node, error):
+    @pytest.hookimpl
+    def pytest_testnodedown(self, node, error) -> None:
         if not error:
             return
-        self.write_line("[{}] node down: {}".format(node.gateway.id, error))
+        self.write_line(f"[{node.gateway.id}] node down: {error}")
 
 
 def get_default_max_worker_restart(config):
@@ -435,3 +486,36 @@ def get_default_max_worker_restart(config):
         # if --max-worker-restart was not provided, use a reasonable default (#226)
         result = config.option.numprocesses * 4
     return result
+
+
+def get_workers_status_line(
+    status_and_items: Sequence[tuple[WorkerStatus, int]]
+) -> str:
+    """
+    Return the line to display during worker setup/collection based on the
+    status of the workers and number of tests collected for each.
+    """
+    statuses = [s for s, c in status_and_items]
+    total_workers = len(statuses)
+    workers_noun = "worker" if total_workers == 1 else "workers"
+    if status_and_items and all(s == WorkerStatus.CollectionDone for s in statuses):
+        # All workers collect the same number of items, so we grab
+        # the total number of items from the first worker.
+        first = status_and_items[0]
+        status, tests_collected = first
+        tests_noun = "item" if tests_collected == 1 else "items"
+        return f"{total_workers} {workers_noun} [{tests_collected} {tests_noun}]"
+    if WorkerStatus.CollectionDone in statuses:
+        done = sum(1 for s, c in status_and_items if c > 0)
+        return f"collecting: {done}/{total_workers} {workers_noun}"
+    if WorkerStatus.ReadyForCollection in statuses:
+        ready = statuses.count(WorkerStatus.ReadyForCollection)
+        return f"ready: {ready}/{total_workers} {workers_noun}"
+    if WorkerStatus.Initialized in statuses:
+        initialized = statuses.count(WorkerStatus.Initialized)
+        return f"initialized: {initialized}/{total_workers} {workers_noun}"
+    if WorkerStatus.Created in statuses:
+        created = statuses.count(WorkerStatus.Created)
+        return f"created: {created}/{total_workers} {workers_noun}"
+
+    return ""
