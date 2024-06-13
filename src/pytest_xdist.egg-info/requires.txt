@@ -1,5 +1,5 @@
-execnet>=1.1
-pytest>=6.2.0
+execnet>=2.1
+pytest>=7.0.0
 
 [psutil]
 psutil>=3.0

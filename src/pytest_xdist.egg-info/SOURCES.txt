@@ -1,10 +1,10 @@
+.readthedocs.yaml
 CHANGELOG.rst
 LICENSE
 MANIFEST.in
 README.rst
 RELEASING.rst
 pyproject.toml
-setup.cfg
 tox.ini
 changelog/_template.rst
 docs/.gitignore
@@ -17,6 +17,7 @@ docs/how-to.rst
 docs/index.rst
 docs/known-limitations.rst
 docs/remote.rst
+docs/requirements.txt
 docs/subprocess.rst
 example/boxed.txt
 example/loadscope/requirements.txt
@@ -49,6 +50,7 @@ src/xdist/scheduler/load.py
 src/xdist/scheduler/loadfile.py
 src/xdist/scheduler/loadgroup.py
 src/xdist/scheduler/loadscope.py
+src/xdist/scheduler/protocol.py
 src/xdist/scheduler/worksteal.py
 testing/acceptance_test.py
 testing/conftest.py
