@@ -1,3 +1,81 @@
+pytest-xdist 3.6.1 (2024-04-28)
+===============================
+
+Bug Fixes
+---------
+
+- `#1071 <https://github.com/pytest-dev/pytest-xdist/issues/1071>`_: Add backward compatibility for deadlock issue with the ``execnet`` new ``main_thread_only`` "execmodel" triggered when pytest-cov accesses rinfo.
+
+pytest-xdist 3.6.0 (2024-04-19)
+===============================
+
+This release was YANKED due to a regression fixed in 3.6.1.
+
+Features
+--------
+
+- `#1027 <https://github.com/pytest-dev/pytest-xdist/pull/1027>`_:``pytest-xdist`` workers now always execute the tests in the main thread.
+  Previously some tests might end up executing in a separate thread other than ``main`` in the workers, due to some internal `execnet`` details. This can cause problems specially with async frameworks where the event loop is running in the ``main`` thread (for example `#620 <https://github.com/pytest-dev/pytest-xdist/issues/620>`__).
+
+Bug Fixes
+---------
+
+- `#1024 <https://github.com/pytest-dev/pytest-xdist/issues/1024>`_: Added proper handling of ``shouldstop`` (such as set by ``--max-fail``) and ``shouldfail`` conditions in workers.
+  Previously, a worker might have continued executing further tests before the controller could terminate the session.
+
+- `#1028 <https://github.com/pytest-dev/pytest-xdist/issues/1028>`_: Fixed compatibility issue between `looponfail` and editable installs.
+
+- `#620 <https://github.com/pytest-dev/pytest-xdist/issues/620>`_: Use the new ``main_thread_only`` ``execnet`` "execmodel" so that code which expects to only run in the main thread will now work as expected.
+
+- `#937 <https://github.com/pytest-dev/pytest-xdist/issues/937>`_: Fixed a bug where plugin would raise an incompatibility error with ``--pdb`` despite using ``-n0``.
+
+
+Removals
+--------
+
+- `#1053 <https://github.com/pytest-dev/pytest-xdist/issues/1053>`_: Dropped support for Python 3.7.
+
+- `#1057 <https://github.com/pytest-dev/pytest-xdist/issues/1057>`_: pytest>=7.0.0 is now required.
+
+  execnet>=2.1.0 is now required.
+
+
+Trivial Changes
+---------------
+
+- `#1020 <https://github.com/pytest-dev/pytest-xdist/issues/1020>`_: pytest-xdist's ``setup.py`` file is removed.
+
+  If you relied on this file, e.g. to install pytest using ``setup.py install``,
+  please see `Why you shouldn't invoke setup.py directly <https://blog.ganssle.io/articles/2021/10/setup-py-deprecated.html#summary>`_ for alternatives.
+
+- `#1057 <https://github.com/pytest-dev/pytest-xdist/issues/1057>`_: The internals of pytest-xdist are now fully typed. The typing is not exposed yet.
+
+- `#996 <https://github.com/pytest-dev/pytest-xdist/issues/996>`_: Adjusted license file format and content to ensure security scanners will identity the license.
+
+pytest-xdist 3.5.0 (2023-11-21)
+===============================
+
+Features
+--------
+
+- `#632 <https://github.com/pytest-dev/pytest-xdist/issues/632>`_: ``--dist=loadscope`` now sorts scopes by number of tests to assign largest scopes early -- in many cases this should improve overall test session running time, as there is less chance of a large scope being left to be processed near the end of the session, leaving other workers idle.
+
+
+pytest-xdist 3.4.0 (2023-11-11)
+===============================
+
+Features
+--------
+
+- `#963 <https://github.com/pytest-dev/pytest-xdist/issues/963>`_: Wait for workers to finish reporting when test run stops early.
+
+  This makes sure that the results of in-progress tests are displayed.
+  Previously these reports were being discarded, losing information about the
+  test run.
+
+- `#965 <https://github.com/pytest-dev/pytest-xdist/issues/965>`_: Added support for Python 3.12.
+
+
 pytest-xdist 3.3.1 (2023-05-19)
 ===============================
 
